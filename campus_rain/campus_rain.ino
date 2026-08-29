@@ -45,6 +45,7 @@ struct RainData {
   bool rainNow = false;
   int rainStartsInMin = -1;
   int rainEndsInMin = -1;
+  int altStartsInMin = -1;
   int rainMinutes2h = 0;
   int probPct = 0;
   float temp = NAN;
@@ -401,6 +402,7 @@ static bool parseRain(const char *body) {
   d.rainNow = now["rainNow"].as<bool>();
   d.rainStartsInMin = now["rainStartsInMin"].is<int>() ? now["rainStartsInMin"].as<int>() : -1;
   d.rainEndsInMin = now["rainEndsInMin"].is<int>() ? now["rainEndsInMin"].as<int>() : -1;
+  d.altStartsInMin = now["startsInAlt"].is<int>() ? now["startsInAlt"].as<int>() : -1;
   d.probPct = now["probPct"].as<int>();
   d.rainMinutes2h = now["rainMinutes2h"].as<int>();
   const char *trend = now["trend"] | "";
@@ -540,7 +542,9 @@ static void buildUI() {
   } else if (nowcastExpired) {
     lv_label_set_text(verdict, "NO RADAR");
     lv_label_set_text(prob, "");
-    if (rain.hasNextRain) {
+    if (rain.altStartsInMin >= 0 && rain.altStartsInMin < 120) {
+      setLabelText(sub, "MODEL: RAIN IN %d MIN", rain.altStartsInMin);
+    } else if (rain.hasNextRain) {
       if (strcmp(rain.nextRainSource, "radar") == 0) {
         setLabelText(sub, "下一场雨 %s", rain.nextRainAt);
       } else {
@@ -564,6 +568,10 @@ static void buildUI() {
     setLabelText(verdict, "RAIN IN %d MIN", rain.rainStartsInMin);
     setLabelText(prob, "P %d%%  %d MIN", rain.probPct, rain.rainMinutes2h);
     setLabelText(sub, "预计 %d 分钟后开始，持续约 %d 分钟", rain.rainStartsInMin, duration);
+  } else if (rain.altStartsInMin >= 0 && rain.altStartsInMin < 120) {
+    setLabelText(verdict, "MODEL RAIN");
+    setLabelText(prob, "P %d%%", rain.probPct);
+    setLabelText(sub, "MODEL: RAIN IN %d MIN (UMBRELLA)", rain.altStartsInMin);
   } else {
     lv_label_set_text(verdict, "DRY FOR 2H");
     setLabelText(prob, "P %d%%", rain.probPct);
@@ -689,9 +697,10 @@ static void refreshRain() {
 
   time_t nowDbg = time(nullptr);
   bool expiredDbg = rain.valid && rain.expiresAt > 0 && nowDbg >= rain.expiresAt;
-  Serial.printf("[ui] valid=%d expired=%d startMin=%d endMin=%d prob=%d%% nextRain=%s(%s) temp=%.1f hum=%d km=%.0f\n",
+  Serial.printf("[ui] valid=%d expired=%d startMin=%d endMin=%d altMin=%d prob=%d%% nextRain=%s(%s) temp=%.1f hum=%d km=%.0f\n",
                 (int)rain.valid, (int)expiredDbg, rain.rainStartsInMin, rain.rainEndsInMin,
-                rain.probPct, rain.nextRainAt, rain.nextRainSource, rain.temp, rain.humidity, rain.nearestKm);
+                rain.altStartsInMin, rain.probPct, rain.nextRainAt, rain.nextRainSource,
+                rain.temp, rain.humidity, rain.nearestKm);
 
   heap_caps_free(body);
   lastFetchMs = millis();
