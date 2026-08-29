@@ -9,12 +9,12 @@
 #include "wifi_config.h"
 
 // campus-rain：南校未来 2 小时降雨桌面屏
-// 数据源：rain.yurikale.top 的 IoT 精简 JSON（约 1.5KB），走 jsDelivr CDN
+// 数据源：先走 rain.yurikale.top 直出，其次 Cloudflare Worker 无缓存接口，jsDelivr 仅兜底
 
 LV_FONT_DECLARE(lv_font_cn_16);
 LV_FONT_DECLARE(lv_font_clock_64);
 
-#define PRIMARY_HOST "cdn.jsdelivr.net"
+#define PRIMARY_HOST "rain.yurikale.top"
 #define RAIN_PORT 443
 
 struct FetchTarget {
@@ -23,10 +23,14 @@ struct FetchTarget {
 };
 
 static const FetchTarget kFetchTargets[] = {
+    // 站点直出：GitHub Pages + CDN，实测校园网可达，最多滞后约 10 分钟
+    {"rain.yurikale.top", "/data/iot/sysu-south.json"},
+    // 无缓存接口：Cloudflare Worker 每次回源 GitHub raw，其他网络环境可用
+    {"campus-rain.hydrog.workers.dev", "/api/iot?campus=sysu-south"},
+    // jsDelivr 镜像兜底：偶尔有旧缓存，只在上面两个源都不可用时使用
     {"cdn.jsdelivr.net", "/gh/HydroGest/campus-rain@main/data/iot/sysu-south.json"},
     {"fastly.jsdelivr.net", "/gh/HydroGest/campus-rain@main/data/iot/sysu-south.json"},
     {"gcore.jsdelivr.net", "/gh/HydroGest/campus-rain@main/data/iot/sysu-south.json"},
-    {"rain.yurikale.top", "/data/iot/sysu-south.json"},
 };
 
 #define SCREEN_W 400
@@ -588,10 +592,10 @@ static void buildUI() {
 
   {
     // 未来 2 小时降雨柱状图：每根柱子代表 10 分钟
+    // 柱高随雨量缩放，并用 空心/实心/加宽+白帽 区分 小雨/中雨/大雨
     int chartBottom = 266;
-    int barAreaH = 72;
+    int barAreaH = 44;
     const int barCount = 12;
-    const int barW = 26;
     const int step = 31;
 
     float maxI = 0;
@@ -602,17 +606,42 @@ static void buildUI() {
 
     for (int i = 0; i < barCount; i++) {
       float v = rain.minutes[i * 10];
-      bool rainy = v >= RAIN_THRESHOLD;
-      int h = rainy ? (int)(v / maxI * barAreaH) : 6;
-      if (h < 6) h = rainy ? 8 : 6;
+      int h, w, style;
+      if (v < RAIN_THRESHOLD) {
+        h = 6;
+        w = 12;
+        style = 0; // 无雨：浅刻度
+      } else {
+        h = (int)(v / maxI * barAreaH);
+        if (h < 10) h = 10;
+        if (v < 0.25f) {
+          w = 16;
+          style = 1; // 小雨：空心柱
+        } else if (v < 1.0f) {
+          w = 22;
+          style = 2; // 中雨：实心柱
+        } else {
+          w = 26;
+          style = 3; // 大雨：实心加宽 + 白帽
+        }
+      }
       lv_obj_t *bar = lv_obj_create(screen);
       lv_obj_remove_style_all(bar);
-      lv_obj_set_size(bar, barW, h);
-      lv_obj_set_pos(bar, 16 + i * step, chartBottom - h);
-      lv_obj_set_style_bg_color(bar, rainy ? lv_color_black() : lv_color_white(), 0);
+      lv_obj_set_size(bar, w, h);
+      lv_obj_set_pos(bar, 16 + i * step + (26 - w) / 2, chartBottom - h);
+      lv_obj_set_style_bg_color(bar, style == 0 ? lv_color_white() : lv_color_black(), 0);
       lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-      lv_obj_set_style_border_width(bar, 1, 0);
+      lv_obj_set_style_border_width(bar, style == 1 ? 2 : 1, 0);
       lv_obj_set_style_border_color(bar, lv_color_black(), 0);
+      if (style == 3) {
+        // 大雨柱顶加白色短帽，一眼看出这段雨势更强
+        lv_obj_t *cap = lv_obj_create(bar);
+        lv_obj_remove_style_all(cap);
+        lv_obj_set_size(cap, w - 8, 2);
+        lv_obj_align(cap, LV_ALIGN_TOP_MID, 0, 2);
+        lv_obj_set_style_bg_color(cap, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(cap, LV_OPA_COVER, 0);
+      }
     }
 
     lv_obj_t *nowLbl = makeLabel(screen, &lv_font_montserrat_14, 16, chartBottom + 6, LV_ALIGN_TOP_LEFT);
@@ -673,12 +702,16 @@ static void refreshRain() {
   size_t bodyLen = 0;
   bool fetched = false;
   bool parsed = false;
+  time_t fetchNow = time(nullptr);
   for (const FetchTarget &target : kFetchTargets) {
     bodyLen = 0;
     fetched = httpFetch(target.host, target.path, body, 64 * 1024, bodyLen);
     parsed = fetched && parseRain(body);
-    Serial.printf("[rain] %s fetched=%d parsed=%d bytes=%d\n", target.host, (int)fetched, (int)parsed, (int)bodyLen);
-    if (fetched && parsed) {
+    bool stale = !parsed || (rain.expiresAt > 0 && fetchNow >= rain.expiresAt);
+    Serial.printf("[rain] %s fetched=%d parsed=%d stale=%d bytes=%d\n",
+                  target.host, (int)fetched, (int)parsed, (int)stale, (int)bodyLen);
+    // 数据过期也视为失败：继续找更新鲜的源，避免 jsDelivr 旧缓存导致 NO RADAR
+    if (fetched && parsed && !stale) {
       break;
     }
   }
